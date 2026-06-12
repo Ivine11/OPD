@@ -1130,6 +1130,21 @@ class RayPPOTrainer:
                             batch.meta_info["kl_estimator"] = kl_estimator
                             batch.meta_info["reward_weight_mode"] = reward_weight_mode
                             batch.meta_info["teacher_temperature"] = teacher_temperature
+                            batch.meta_info["teacher_conf_weight_mode"] = self.config.actor_rollout_ref.rollout.get(
+                                "teacher_conf_weight_mode", "none"
+                            )
+                            batch.meta_info["teacher_conf_alpha"] = self.config.actor_rollout_ref.rollout.get(
+                                "teacher_conf_alpha", 0.2
+                            )
+                            batch.meta_info["teacher_conf_min"] = self.config.actor_rollout_ref.rollout.get(
+                                "teacher_conf_min", 0.2
+                            )
+                            batch.meta_info["teacher_conf_max"] = self.config.actor_rollout_ref.rollout.get(
+                                "teacher_conf_max", 2.0
+                            )
+                            batch.meta_info["teacher_conf_normalize"] = self.config.actor_rollout_ref.rollout.get(
+                                "teacher_conf_normalize", True
+                            )
                             
                             with marked_timer("compute_rm_score", timing_raw, color="magenta"):
                                 teacher_data = self.rm_wg.compute_rm_score(batch)
@@ -1142,6 +1157,22 @@ class RayPPOTrainer:
                                 with marked_timer("compute_distillation_reward", timing_raw, color="orange"):
                                     distillation_output = self.actor_rollout_wg.compute_distillation_reward(batch)
                                     batch = batch.union(distillation_output)
+                                    if "teacher_confidence" in batch.batch.keys():
+                                        teacher_confidence = batch.batch["teacher_confidence"]
+                                        response_mask = batch.batch.get("response_mask", None)
+                                        if response_mask is not None:
+                                            valid_confidence = teacher_confidence[response_mask.bool()]
+                                        else:
+                                            valid_confidence = teacher_confidence.reshape(-1)
+                                        if valid_confidence.numel() > 0:
+                                            metrics.update(
+                                                {
+                                                    "teacher_confidence/mean": valid_confidence.mean().detach().item(),
+                                                    "teacher_confidence/min": valid_confidence.min().detach().item(),
+                                                    "teacher_confidence/max": valid_confidence.max().detach().item(),
+                                                    "teacher_confidence/std": valid_confidence.std(unbiased=False).detach().item(),
+                                                }
+                                            )
                         
                         # Plot overlapping tokens for Reverse KL
                         if (self.global_steps == 1 or self.global_steps % 10 == 0) and "student_valid_counts" in batch.batch.keys():
@@ -2233,9 +2264,11 @@ class RayPPOTrainer:
                     # Pop unused keys to save memory before PPO update
                     keys_to_pop = [
                         "teacher_on_student_log_probs",
+                        "teacher_sample_log_probs",
                         "teacher_top_k_ids",
                         "teacher_top_k_log_probs",
                         "teacher_entropy",
+                        "teacher_confidence",
                         "overlap_mask",
                         "teacher_in_student_mask",
                         "student_log_probs_on_teacher_ids",

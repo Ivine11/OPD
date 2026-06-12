@@ -61,6 +61,11 @@ export N_RESPONSES=4 # TODO: 4 / 8 / 16 / 32 (default: 8)
 export LOG_PROB_TOP_K=${LOG_PROB_TOP_K:-16} # 0 represents no top-k sampling
 export TOP_K_STRATEGY=${TOP_K_STRATEGY:-"only_stu"} # "only_stu" or "only_tch" or "intersection" or "union" or "union-intersection"
 export REWARD_WEIGHT_MODE=${REWARD_WEIGHT_MODE:-"student_p"} # "student_p" or "teacher_p" or "none"
+export TEACHER_CONF_WEIGHT_MODE=${TEACHER_CONF_WEIGHT_MODE:-"none"} # "none" keeps original OPD; "entropy_exp" and "prefix_likelihood" enable teacher-confidence weighting
+export TEACHER_CONF_ALPHA=${TEACHER_CONF_ALPHA:-0.2}
+export TEACHER_CONF_MIN=${TEACHER_CONF_MIN:-0.2}
+export TEACHER_CONF_MAX=${TEACHER_CONF_MAX:-2.0}
+export TEACHER_CONF_NORMALIZE=${TEACHER_CONF_NORMALIZE:-True}
 # export LR=${LR:-1e-6}
 # export LR_SCHEDULER=${LR_SCHEDULER:-constant}
 export USE_KL=${USE_KL:-False} # TODO: True / False (default False)
@@ -132,7 +137,11 @@ export REWARD_MODEL_NAME=$(basename "$REWARD_MODEL_PATH")
 
 export PROJECT_PATH=checkpoint
 export PARALLEL_SIZE=1
-export CKPT_PATH=${PROJECT_PATH}/${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}-$(date +%Y-%m-%d_%H-%M-%S)
+export TEACHER_CONF_TAG=""
+if [ "$TEACHER_CONF_WEIGHT_MODE" != "none" ]; then
+    export TEACHER_CONF_TAG="-tconf_${TEACHER_CONF_WEIGHT_MODE}-alpha_${TEACHER_CONF_ALPHA}-clip_${TEACHER_CONF_MIN}_${TEACHER_CONF_MAX}-norm_${TEACHER_CONF_NORMALIZE}"
+fi
+export CKPT_PATH=${PROJECT_PATH}/${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}${TEACHER_CONF_TAG}-$(date +%Y-%m-%d_%H-%M-%S)
 export OUTLINES_CACHE_DIR=~/.cache/outlines/$(uuidgen)
 export NCCL_DEBUG=WARN
 
@@ -143,7 +152,7 @@ export SWANLAB_LOG_DIR=${PROJECT_PATH}/swanlab_log
 export HYDRA_FULL_ERROR=1
 
 
-export EXPERIMENT_NAME=${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}-$(date +%Y-%m-%d_%H-%M-%S)
+export EXPERIMENT_NAME=${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}${TEACHER_CONF_TAG}-$(date +%Y-%m-%d_%H-%M-%S)
 
 KL_ARGS=""
 if [ "$USE_KL" = "True" ]; then
@@ -208,6 +217,11 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.rollout.top_k_strategy=$TOP_K_STRATEGY \
     +actor_rollout_ref.rollout.reward_weight_mode=$REWARD_WEIGHT_MODE \
     +actor_rollout_ref.rollout.teacher_temperature=$TEACHER_TEMPERATURE \
+    +actor_rollout_ref.rollout.teacher_conf_weight_mode=$TEACHER_CONF_WEIGHT_MODE \
+    +actor_rollout_ref.rollout.teacher_conf_alpha=$TEACHER_CONF_ALPHA \
+    +actor_rollout_ref.rollout.teacher_conf_min=$TEACHER_CONF_MIN \
+    +actor_rollout_ref.rollout.teacher_conf_max=$TEACHER_CONF_MAX \
+    +actor_rollout_ref.rollout.teacher_conf_normalize=$TEACHER_CONF_NORMALIZE \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$PARALLEL_SIZE \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.max_model_len=$MAX_MODEL_LEN \

@@ -2726,6 +2726,9 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             tensors = {}
             if rm_scores is not None:
                 tensors["rm_scores"] = rm_scores
+
+            if teacher_logp is not None:
+                tensors["teacher_sample_log_probs"] = teacher_logp
             
             if teacher_on_student_logp is not None:
                 tensors["teacher_on_student_log_probs"] = teacher_on_student_logp

@@ -463,6 +463,16 @@ class DataParallelPPOActor(BasePPOActor):
         strategy = data.meta_info.get("top_k_strategy", "only_stu")
         kl_estimator = data.meta_info.get("kl_estimator", "k1")
         reward_weight_mode = data.meta_info.get("reward_weight_mode", "student_p")  # "student_p", "teacher_p", or "none"
+        teacher_conf_weight_mode = data.meta_info.get("teacher_conf_weight_mode", "none")
+        teacher_conf_alpha = data.meta_info.get("teacher_conf_alpha", 0.2)
+        teacher_conf_min = data.meta_info.get("teacher_conf_min", 0.2)
+        teacher_conf_max = data.meta_info.get("teacher_conf_max", 2.0)
+        teacher_conf_normalize = data.meta_info.get("teacher_conf_normalize", True)
+        teacher_conf_alpha = float(teacher_conf_alpha)
+        teacher_conf_min = float(teacher_conf_min)
+        teacher_conf_max = float(teacher_conf_max)
+        if isinstance(teacher_conf_normalize, str):
+            teacher_conf_normalize = teacher_conf_normalize.lower() in ("true", "1", "yes")
         micro_batch_size = data.meta_info["micro_batch_size"]
         temperature = data.meta_info["temperature"]
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
@@ -619,7 +629,58 @@ class DataParallelPPOActor(BasePPOActor):
             res_tensors["union_top_k_ids"] = union_ids
             res_tensors["union_top_k_log_probs"] = S_logp_union
             res_tensors["student_log_probs_on_teacher_ids"] = S_on_T
-            
+
+        if teacher_conf_weight_mode != "none":
+            response_mask = data.batch.get("response_mask", None)
+            if teacher_conf_weight_mode == "entropy_exp":
+                teacher_entropy = data.batch.get("teacher_entropy", None)
+                if teacher_entropy is None:
+                    raise ValueError("teacher_conf_weight_mode=entropy_exp requires teacher_entropy.")
+                teacher_confidence = torch.exp(-teacher_conf_alpha * teacher_entropy.to(device))
+            elif teacher_conf_weight_mode == "prefix_likelihood":
+                teacher_sample_log_probs = data.batch.get("teacher_sample_log_probs", None)
+                if teacher_sample_log_probs is None:
+                    raise ValueError("teacher_conf_weight_mode=prefix_likelihood requires teacher_sample_log_probs.")
+                teacher_sample_log_probs = teacher_sample_log_probs.to(device)
+                if response_mask is not None:
+                    prefix_mask = response_mask.to(device).float()
+                    teacher_sample_log_probs = torch.where(
+                        prefix_mask.bool(), teacher_sample_log_probs, torch.zeros_like(teacher_sample_log_probs)
+                    )
+                else:
+                    prefix_mask = torch.ones_like(teacher_sample_log_probs)
+
+                prefix_logp_sum = torch.cumsum(teacher_sample_log_probs, dim=-1) - teacher_sample_log_probs
+                prefix_token_count = torch.cumsum(prefix_mask, dim=-1) - prefix_mask
+                avg_prefix_logp = prefix_logp_sum / prefix_token_count.clamp_min(1.0)
+                teacher_confidence = torch.exp(teacher_conf_alpha * avg_prefix_logp)
+                teacher_confidence = torch.where(
+                    prefix_token_count > 0,
+                    teacher_confidence,
+                    torch.ones_like(teacher_confidence),
+                )
+            else:
+                raise ValueError(f"Unknown teacher_conf_weight_mode: {teacher_conf_weight_mode}")
+
+            if response_mask is not None:
+                response_mask = response_mask.to(device).bool()
+                teacher_confidence = torch.where(response_mask, teacher_confidence, torch.zeros_like(teacher_confidence))
+                if teacher_conf_normalize:
+                    valid_count = response_mask.float().sum().clamp_min(1.0)
+                    mean_confidence = teacher_confidence.sum() / valid_count
+                    teacher_confidence = teacher_confidence / mean_confidence.clamp_min(1e-6)
+
+            teacher_confidence = torch.clamp(
+                teacher_confidence,
+                min=teacher_conf_min,
+                max=teacher_conf_max,
+            )
+            if rm_scores.dim() == 3:
+                rm_scores = rm_scores * teacher_confidence.unsqueeze(-1)
+            else:
+                rm_scores = rm_scores * teacher_confidence
+            res_tensors["teacher_confidence"] = teacher_confidence
+
         res_tensors["rm_scores"] = rm_scores
         return DataProto.from_dict(tensors=res_tensors)
 
