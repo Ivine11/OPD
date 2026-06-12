@@ -785,7 +785,91 @@ class RayPPOTrainer:
                 config=self.config, worker_group=self.actor_rollout_wg, rm_wg=self.rm_wg
             )
 
-    def _save_checkpoint(self):
+    @staticmethod
+    def _metric_to_jsonable(value):
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 1:
+                return value.detach().cpu().item()
+            return value.detach().cpu().tolist()
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        return value
+
+    def _select_checkpoint_quality_metrics(self, metrics: dict | None):
+        """Keep compact metrics that are useful for judging checkpoint quality."""
+        if not metrics:
+            return {}
+
+        exact_keys = {
+            "training/global_step",
+            "training/epoch",
+            "critic/score/mean",
+            "critic/score/max",
+            "critic/score/min",
+            "critic/rewards/mean",
+            "critic/rewards/max",
+            "critic/rewards/min",
+            "critic/true_reward/mean",
+            "critic/true_reward/max",
+            "critic/true_reward/min",
+        }
+        prefixes = (
+            "val-core/",
+            "val-aux/",
+        )
+
+        quality_metrics = {}
+        for key, value in metrics.items():
+            if key in exact_keys or key.startswith(prefixes):
+                quality_metrics[key] = self._metric_to_jsonable(value)
+        return quality_metrics
+
+    def _append_checkpoint_quality_metrics(self, local_global_step_folder: str, metrics: dict | None):
+        quality_metrics = self._select_checkpoint_quality_metrics(metrics)
+        if not quality_metrics:
+            return
+
+        os.makedirs(local_global_step_folder, exist_ok=True)
+        record = {
+            "global_step": self.global_steps,
+            "checkpoint_dir": local_global_step_folder,
+            "metrics": quality_metrics,
+        }
+
+        step_metrics_file = os.path.join(local_global_step_folder, "quality_metrics.json")
+        with open(step_metrics_file, "w") as f:
+            json.dump(record, f, ensure_ascii=False, indent=2, sort_keys=True)
+            f.write("\n")
+
+        metrics_history_file = os.path.join(self.config.trainer.default_local_dir, "checkpoint_quality_metrics.jsonl")
+        with open(metrics_history_file, "a") as f:
+            f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+        print(f"Saved checkpoint quality metrics to {step_metrics_file}")
+
+    def _append_step_quality_metrics(self, metrics: dict | None):
+        quality_metrics = self._select_checkpoint_quality_metrics(metrics)
+        if not quality_metrics:
+            return
+
+        os.makedirs(self.config.trainer.default_local_dir, exist_ok=True)
+        record = {
+            "global_step": self.global_steps,
+            "metrics": quality_metrics,
+        }
+
+        step_history_file = os.path.join(self.config.trainer.default_local_dir, "step_quality_metrics.jsonl")
+        with open(step_history_file, "a") as f:
+            f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+        latest_file = os.path.join(self.config.trainer.default_local_dir, "latest_quality_metrics.json")
+        with open(latest_file, "w") as f:
+            json.dump(record, f, ensure_ascii=False, indent=2, sort_keys=True)
+            f.write("\n")
+
+    def _save_checkpoint(self, metrics: dict | None = None):
         from verl.utils.fs import local_mkdir_safe
 
         # path: given_path + `/global_step_{global_steps}` + `/actor`
@@ -844,6 +928,8 @@ class RayPPOTrainer:
         )
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
+
+        self._append_checkpoint_quality_metrics(local_global_step_folder, metrics)
 
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
@@ -2310,6 +2396,17 @@ class RayPPOTrainer:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
 
+                # training and quality metrics are collected before checkpointing
+                # so that each saved checkpoint gets a matching metrics record.
+                metrics.update(
+                    {
+                        "training/global_step": self.global_steps,
+                        "training/epoch": epoch,
+                    }
+                )
+                metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                self._append_step_quality_metrics(metrics)
+
                 # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                 esi_close_to_expiration = should_save_ckpt_esi(
                     max_steps_duration=self.max_steps_duration,
@@ -2328,7 +2425,7 @@ class RayPPOTrainer:
                     if esi_close_to_expiration:
                         print("Force saving checkpoint: ESI instance expiration approaching.")
                     with marked_timer("save_checkpoint", timing_raw, color="green"):
-                        self._save_checkpoint()
+                        self._save_checkpoint(metrics=metrics)
 
                 with marked_timer("stop_profile", timing_raw):
                     next_step_profile = (
@@ -2347,15 +2444,6 @@ class RayPPOTrainer:
                 steps_duration = timing_raw["step"]
                 self.max_steps_duration = max(self.max_steps_duration, steps_duration)
 
-                # training metrics
-                metrics.update(
-                    {
-                        "training/global_step": self.global_steps,
-                        "training/epoch": epoch,
-                    }
-                )
-                # collect metrics
-                metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()
